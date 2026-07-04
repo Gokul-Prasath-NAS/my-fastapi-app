@@ -35,6 +35,34 @@ class DBItem(Base):
 # Automatically create the table inside PostgreSQL if it's not already there
 Base.metadata.create_all(bind=engine)
 
+# NEW: Database Seeding Logic
+def seed_initial_data():
+    db = SessionLocal()
+    try:
+        # Check if the items table is completely empty
+        item_count = db.query(DBItem).count()
+        if item_count == 0:
+            print("Database is empty! Seeding initial data items...")
+            
+            # Define your initial sample data entries
+            initial_items = [
+                DBItem(id=1, name="Premium Badminton Racket", status="Strung"),
+                DBItem(id=2, name="O-Ring Drive Chain Lube", status="In Stock"),
+                DBItem(id=3, name="Riding Gloves", status="Shipped")
+            ]
+            
+            # Add and commit them to the database
+            db.add_all(initial_items)
+            db.commit()
+            print("Database seeded successfully.")
+    except Exception as e:
+        print(f"Error seeding database: {e}")
+    finally:
+        db.close()
+
+# Run the seeding function right when the app starts up
+seed_initial_data()
+
 # Dependency to get a fresh database session per API request
 def get_db():
     db = SessionLocal()
