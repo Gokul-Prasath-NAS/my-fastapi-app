@@ -5,55 +5,84 @@ from pydantic import BaseModel
 from typing import List
 from dotenv import load_dotenv
 
-# Load local environment variables from the .env file
+# Database Specific Imports
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.orm import sessionmaker, Session, declarative_base
+
 load_dotenv()
 
-app = FastAPI(
-    title="MY Inventory Tracking API",
-    description="A secure FastAPI application. Use the Authorize button to unlock POST requests.",
-    version="1.0.0"
-)
+# --- DATABASE SETUP ---
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is missing!")
 
-# Set up our security interceptor
+# Handle Render's postgresql:// vs postgres:// quirk if necessary
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Defining our SQL Table Structure
+class DBItem(Base):
+    __tablename__ = "items"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    status = Column(String)
+
+# Automatically create the table inside PostgreSQL if it's not already there
+Base.metadata.create_all(bind=engine)
+
+# Dependency to get a fresh database session per API request
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# --- FASTAPI & SECURITY SETUP ---
+app = FastAPI(title="GP Database-Backed API", version="2.0.0")
+
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
-
-# Read the secret key from the system environment
 MASTER_API_KEY = os.getenv("MY_SECRET_API_KEY", "fallback_local_key")
 
-# Mock internal database storage
-data_store = [
-    {"id": 1, "name": "Premium Badminton Racket", "status": "Strung"},
-    {"id": 2, "name": "O-Ring Drive Chain Lube", "status": "In Stock"}
-]
-
-class Item(BaseModel):
+class ItemSchema(BaseModel):
     id: int
     name: str
     status: str
 
-# Dependency check function
+    class Config:
+        from_attributes = True
+
 def verify_api_key(api_key: str = Depends(api_key_header)):
     if api_key != MASTER_API_KEY:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or Missing API Key. Access Denied."
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key."
         )
     return api_key
 
 # --- ENDPOINTS ---
 
-@app.get("/", tags=["General"])
-def read_root():
-    return {"message": "Welcome to my live API! Navigate to /docs to view the interactive Swagger dashboard."}
+@app.get("/items", response_model=List[ItemSchema], tags=["Inventory"])
+def get_items(db: Session = Depends(get_db)):
+    """Fetch all entries directly out of the live SQL database table."""
+    items = db.query(DBItem).all()
+    return items
 
-@app.get("/items", response_model=List[Item], tags=["Inventory"])
-def get_items():
-    """Public Endpoint: Anyone can view the tracking data."""
-    return data_store
-
-@app.post("/items", response_model=Item, tags=["Inventory"])
-def create_item(item: Item, token: str = Depends(verify_api_key)):
-    """Protected Endpoint: Requires a valid X-API-Key header to append new data."""
-    data_store.append(item.dict())
-    return item
+@app.post("/items", response_model=ItemSchema, tags=["Inventory"])
+def create_item(item: ItemSchema, db: Session = Depends(get_db), token: str = Depends(verify_api_key)):
+    """Insert a brand new verified row directly into the SQL database table."""
+    # Check if item ID already exists to avoid SQL duplicates crashes
+    db_exist = db.query(DBItem).filter(DBItem.id == item.id).first()
+    if db_exist:
+        raise HTTPException(status_code=400, detail="Item ID already exists.")
+        
+    db_item = DBItem(id=item.id, name=item.name, status=item.status)
+    db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+    return db_item
